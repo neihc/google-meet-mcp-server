@@ -23,36 +23,76 @@ class GoogleMeetAPI {
    * Initialize the API client with OAuth2 credentials.
    */
   async initialize() {
-    const credentials = JSON.parse(await fs.readFile(this.credentialsPath, 'utf8'));
+    console.log(`Initializing Google Meet API with credentials from: ${this.credentialsPath}`);
     
-    const { client_id, client_secret, redirect_uris } = credentials.web;
-    
-    const oAuth2Client = new google.auth.OAuth2(
-      client_id, 
-      client_secret, 
-      redirect_uris[0]
-    );
-
     try {
-      // Check if token exists and use it
-      const token = JSON.parse(await fs.readFile(this.tokenPath, 'utf8'));
-      oAuth2Client.setCredentials(token);
+      const credentials = JSON.parse(await fs.readFile(this.credentialsPath, 'utf8'));
       
-      // Check if token is expired and needs refresh
-      if (token.expiry_date && token.expiry_date < Date.now()) {
-        // Token is expired, refresh it
-        const { credentials } = await oAuth2Client.refreshToken(token.refresh_token);
-        await fs.writeFile(this.tokenPath, JSON.stringify(credentials));
-        oAuth2Client.setCredentials(credentials);
+      if (!credentials.web) {
+        throw new Error("Invalid credentials format. Make sure you're using OAuth 2.0 credentials for a web application.");
+      }
+      
+      const { client_id, client_secret, redirect_uris } = credentials.web;
+      
+      if (!client_id || !client_secret || !redirect_uris || redirect_uris.length === 0) {
+        throw new Error("Missing required credential fields (client_id, client_secret, or redirect_uris)");
+      }
+      
+      console.log(`Creating OAuth2 client with redirect URI: ${redirect_uris[0]}`);
+      const oAuth2Client = new google.auth.OAuth2(
+        client_id, 
+        client_secret, 
+        redirect_uris[0]
+      );
+
+      try {
+        // Check if token exists and use it
+        console.log(`Attempting to read token from: ${this.tokenPath}`);
+        const token = JSON.parse(await fs.readFile(this.tokenPath, 'utf8'));
+        
+        if (!token.refresh_token) {
+          console.warn("Warning: Token does not contain refresh_token");
+        }
+        
+        oAuth2Client.setCredentials(token);
+        
+        // Check if token is expired and needs refresh
+        if (token.expiry_date && token.expiry_date < Date.now()) {
+          console.log("Token is expired, attempting to refresh...");
+          if (!token.refresh_token) {
+            throw new Error("Cannot refresh token: No refresh_token available");
+          }
+          
+          const { credentials } = await oAuth2Client.refreshToken(token.refresh_token);
+          console.log("Token refreshed successfully");
+          await fs.writeFile(this.tokenPath, JSON.stringify(credentials));
+          oAuth2Client.setCredentials(credentials);
+        } else {
+          console.log("Token is valid, no refresh needed");
+        }
+      } catch (error) {
+        console.error(`Error with token: ${error.message}`);
+        throw new Error(
+          "No valid credentials. Please run the setup script first to authorize access."
+        );
+      }
+      
+      // Initialize the calendar API
+      console.log("Initializing Google Calendar API client");
+      this.calendar = google.calendar({ version: 'v3', auth: oAuth2Client });
+      
+      // Test the API connection
+      try {
+        const response = await this.calendar.calendarList.list({ maxResults: 1 });
+        console.log("Successfully connected to Google Calendar API");
+      } catch (testError) {
+        console.error("Failed to connect to Google Calendar API:", testError);
+        throw new Error(`Failed to connect to Google Calendar API: ${testError.message}`);
       }
     } catch (error) {
-      throw new Error(
-        "No valid credentials. Please run the setup script first to authorize access."
-      );
+      console.error(`Initialization error: ${error.message}`);
+      throw error;
     }
-    
-    // Initialize the calendar API
-    this.calendar = google.calendar({ version: 'v3', auth: oAuth2Client });
   }
   
   /**
@@ -167,15 +207,26 @@ class GoogleMeetAPI {
     };
     
     try {
+      console.log('Creating meeting with data:', JSON.stringify(event, null, 2));
+      
+      // Check if calendar API is initialized
+      if (!this.calendar) {
+        throw new Error("Calendar API not initialized. Call initialize() first.");
+      }
+      
       const response = await this.calendar.events.insert({
         calendarId: 'primary',
         conferenceDataVersion: 1,
-        resource: event
+        resource: event,
+        sendUpdates: 'all' // Ensure notifications are sent
       });
+      
+      console.log('API response:', JSON.stringify(response.data, null, 2));
       
       const createdEvent = response.data;
       
       if (!createdEvent.conferenceData) {
+        console.error('Missing conferenceData in response:', JSON.stringify(createdEvent, null, 2));
         throw new Error("Failed to create Google Meet conferencing data");
       }
       
@@ -184,8 +235,13 @@ class GoogleMeetAPI {
         throw new Error("Failed to format meeting data for newly created event");
       }
       
+      console.log('Successfully created meeting:', JSON.stringify(meeting, null, 2));
       return meeting;
     } catch (error) {
+      console.error('Detailed error creating meeting:', error);
+      if (error.response) {
+        console.error('API error response:', JSON.stringify(error.response.data, null, 2));
+      }
       throw new Error(`Error creating meeting: ${error.message}`);
     }
   }
